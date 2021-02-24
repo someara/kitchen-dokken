@@ -40,6 +40,7 @@ module Kitchen
       default_config :chef_image, "chef/chef"
       default_config :chef_version, "latest"
       default_config :data_image, "dokken/kitchen-cache:latest"
+      default_config :creds_file, nil
       default_config :dns, nil
       default_config :dns_search, nil
       default_config :docker_host_url, default_docker_host
@@ -64,8 +65,18 @@ module Kitchen
       default_config :volumes, nil
       default_config :write_timeout, 3600
 
+      def set_creds
+        @creds = [nil]
+        if config[:creds_file]
+          @creds += JSON.parse(IO.read(config[:creds_file]))
+        end
+      end
+
       # (see Base#create)
       def create(state)
+        # credentials to use
+        set_creds
+
         # image to config
         pull_platform_image
 
@@ -566,15 +577,28 @@ module Kitchen
       end
 
       def pull_image(image)
+        original_image = nil
         with_retries do
           if Docker::Image.exist?(image_path(image), {}, docker_connection)
             original_image = Docker::Image.get(image_path(image), {}, docker_connection)
           end
-
-          new_image = Docker::Image.create({ "fromImage" => "#{repo(image)}:#{tag(image)}" }, docker_connection)
-
-          !(original_image && original_image.id.start_with?(new_image.id))
         end
+
+        last_error = nil
+        new_image = @creds.inject(nil) do |img, creds|
+          img ||= begin
+                    with_retries do
+                      Docker::Image.create({ "fromImage" => "#{repo(image)}:#{tag(image)}", "conn" => docker_connection }, creds)
+                    end
+                  rescue Docker::Error::DockerError => e
+                    last_error = e
+                    nil
+                  end
+          img
+        end
+        raise last_error unless new_image
+
+        !(original_image && original_image.id.start_with?(new_image.id))
       end
 
       def runner_container_name
